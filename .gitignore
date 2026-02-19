@@ -2,7 +2,8 @@
 venv/
 
 # Dataset
-data/
+segments_16/
+segments_16.zip
 
 # Python cache
 __pycache__/

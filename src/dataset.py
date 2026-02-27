@@ -17,7 +17,8 @@ class SegmentDataset(Dataset):
         meta: dict with segment metadata
     """
 
-    def __init__(self, manifest_csv: str, return_meta: bool = True):
+    def __init__(self, manifest_csv: str, root_dir: str, return_meta: bool = True):
+        self.root_dir = root_dir
         self.df = pd.read_csv(manifest_csv)
         self.return_meta = return_meta
 
@@ -36,7 +37,7 @@ class SegmentDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        seg_path = row["segment_path"]
+        seg_path = os.path.join(self.root_dir, row["segment_path"])
 
         frame_files = sorted(
             f for f in os.listdir(seg_path) if f.lower().endswith(".png")

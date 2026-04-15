@@ -11,7 +11,7 @@ __pycache__/
 
 # Jupyter
 .ipynb_checkpoints/
-
+03_test_evaluation.ipynb
 # OS
 .DS_Store
 artifacts/

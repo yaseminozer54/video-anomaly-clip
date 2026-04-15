@@ -2,26 +2,17 @@ MODEL_NAME = "ViT-B/32"
 
 DEVICE = "cuda"
 
-SEGMENT_THRESHOLD = 0.225
-VIDEO_THRESHOLD = 0.10
-
 ANOMALY_CLASSES = [
-    "a violent crime happening in a public place",
-    "people physically attacking each other",
-    "a robbery in progress",
-    "an explosion causing chaos",
-    "a dangerous situation involving violence",
-    "criminal activity captured on surveillance camera",
+    "CCTV video of police officers arresting a person",
+    "CCTV video of a massive explosion and fire",
+    "CCTV video of a thief stealing something and committing a crime",
+    "CCTV video of a physical fight between people"
 ]
 
 NORMAL_CLASSES = [
-    "people behaving peacefully in everyday life",
-    "a calm and normal public environment",
-    "ordinary daily activity with no violence",
-    "a safe and uneventful street scene",
+    "CCTV video of a completely normal, safe street with regular traffic",
+    "CCTV video of normal pedestrians walking safely and peacefully",
+    "CCTV video of an empty, quiet, and safe place"
 ]
 
-# Final threshold learned from validation
-FINAL_THRESHOLD = 0.2286
-
-AGGREGATION_METHOD = "p90"
+AGGREGATION_METHOD = "max"

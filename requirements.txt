@@ -4,6 +4,12 @@ numpy
 pillow
 opencv-python
 tqdm
-ftfy
 regex
+ftfy
 git+https://github.com/openai/CLIP.git
+scikit-learn
+matplotlib
+seaborn
+pandas
+fastapi
+uvicorn

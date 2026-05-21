@@ -1,0 +1,121 @@
+{
+    "threshold": -0.02119717951528056,
+    "n_videos": 30,
+    "binary": {
+        "accuracy": 0.7,
+        "balanced_accuracy": 0.6538461537278106,
+        "precision": 0.6538461538461539,
+        "recall": 1.0,
+        "specificity": 0.30769230745562126,
+        "f1": 0.7906976744186046,
+        "roc_auc": 0.7828054298642534,
+        "tp": 17,
+        "tn": 4,
+        "fp": 9,
+        "fn": 0
+    },
+    "type_classification": {
+        "top1_accuracy": 0.0,
+        "top3_accuracy": 0.0
+    },
+    "per_class": [
+        {
+            "class": "Abuse",
+            "n_videos": 1,
+            "detected": 1,
+            "recall": 1.0,
+            "type_acc_top1": 0.0
+        },
+        {
+            "class": "Arrest",
+            "n_videos": 1,
+            "detected": 1,
+            "recall": 1.0,
+            "type_acc_top1": 0.0
+        },
+        {
+            "class": "Arson",
+            "n_videos": 1,
+            "detected": 1,
+            "recall": 1.0,
+            "type_acc_top1": 0.0
+        },
+        {
+            "class": "Assault",
+            "n_videos": 2,
+            "detected": 2,
+            "recall": 1.0,
+            "type_acc_top1": 0.0
+        },
+        {
+            "class": "Burglary",
+            "n_videos": 1,
+            "detected": 1,
+            "recall": 1.0,
+            "type_acc_top1": 0.0
+        },
+        {
+            "class": "Explosion",
+            "n_videos": 1,
+            "detected": 1,
+            "recall": 1.0,
+            "type_acc_top1": 0.0
+        },
+        {
+            "class": "Fighting",
+            "n_videos": 1,
+            "detected": 1,
+            "recall": 1.0,
+            "type_acc_top1": 0.0
+        },
+        {
+            "class": "NormalVideos",
+            "n_videos": 13,
+            "detected": 4,
+            "recall": 0.3077,
+            "type_acc_top1": NaN
+        },
+        {
+            "class": "RoadAccidents",
+            "n_videos": 2,
+            "detected": 2,
+            "recall": 1.0,
+            "type_acc_top1": 0.0
+        },
+        {
+            "class": "Robbery",
+            "n_videos": 1,
+            "detected": 1,
+            "recall": 1.0,
+            "type_acc_top1": 0.0
+        },
+        {
+            "class": "Shooting",
+            "n_videos": 2,
+            "detected": 2,
+            "recall": 1.0,
+            "type_acc_top1": 0.0
+        },
+        {
+            "class": "Shoplifting",
+            "n_videos": 2,
+            "detected": 2,
+            "recall": 1.0,
+            "type_acc_top1": 0.0
+        },
+        {
+            "class": "Stealing",
+            "n_videos": 1,
+            "detected": 1,
+            "recall": 1.0,
+            "type_acc_top1": 0.0
+        },
+        {
+            "class": "Vandalism",
+            "n_videos": 1,
+            "detected": 1,
+            "recall": 1.0,
+            "type_acc_top1": 0.0
+        }
+    ]
+}

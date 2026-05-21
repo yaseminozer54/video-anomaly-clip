@@ -1,20 +1,36 @@
 # Virtual environment
 venv/
-
-# Dataset
-segments_16/
-segments_16.zip
+clip_env/
 
 # Python cache
 __pycache__/
 *.pyc
+*.pyo
 
 # Jupyter
 .ipynb_checkpoints/
-03_test_evaluation.ipynb
+
 # OS
 .DS_Store
-artifacts/
+Thumbs.db
+
+# Data (large files)
 data/
 *.zip
+*.tar.gz
+
+# Model weights
 *.pth
+*.pt
+*.bin
+
+# Outputs (generated — reproduced by running the notebook)
+outputs/
+
+# Unused / legacy notebooks
+notebooks/01_zero_shot_prototype.ipynb
+notebooks/02_stage3_pipeline_evaluation.ipynb
+notebooks/03_stage3_test_evaluation_test.ipynb
+notebooks/03_test_evaluation.ipynb
+notebooks/CLIP_readiness_test.ipynb
+notebooks/Untitled*.ipynb

@@ -1,18 +1,24 @@
-MODEL_NAME = "ViT-B/32"
-
+MODEL_NAME = "ViT-L/14"
 DEVICE = "cuda"
 
 ANOMALY_CLASSES = [
-    "CCTV video of police officers arresting a person",
-    "CCTV video of a massive explosion and fire",
-    "CCTV video of a thief stealing something and committing a crime",
-    "CCTV video of a physical fight between people"
+    "flames and smoke from a fire or arson",
+    "people punching and kicking each other in a violent fight",
+    "a person breaking into a building or stealing property",
+    "police handcuffing or forcibly restraining a person",
+    "a serious car crash or road accident",
+    "someone vandalizing or destroying property",
+    "a person being physically attacked or assaulted",
+    "armed robbery or shooting with a weapon",
 ]
 
 NORMAL_CLASSES = [
-    "CCTV video of a completely normal, safe street with regular traffic",
-    "CCTV video of normal pedestrians walking safely and peacefully",
-    "CCTV video of an empty, quiet, and safe place"
+    "people walking calmly on a street with no incidents",
+    "a quiet and peaceful indoor or outdoor environment",
+    "normal daily activities in a safe public space",
+    "ordinary traffic and pedestrian movement",
+    "people going about their routine without any danger",
+    "a calm surveillance scene with no criminal activity",
+    "people working shopping or socializing peacefully",
+    "an empty or undisturbed area captured on camera",
 ]
-
-AGGREGATION_METHOD = "max"

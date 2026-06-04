@@ -1,219 +1,139 @@
 """
-src/pipeline.py
+src/pipeline.py  (duzeltilmis)
 
-run_realtime_pipeline — video dosyasını segment segment işler
-measure_fps           — kaç segment/saniye işlendiğini ölçer
+Demo / gercek-zamanli cikarim — DEGERLENDIRME boru hattiyla BIREBIR AYNI:
+  - Ayni promptlar      : src.config (ANOMALY_CLASSES = 8, NORMAL_CLASSES = 8)
+  - Ayni skorlama       : segment = kare-embedding ortalamasi -> prompt-max,
+                          video = segmentler uzerinde top-K mean
+  - Ayni esik/oran      : artifacts/threshold.json'dan OKUNUR (sabit yazilmaz)
+
+Boylece demo sonucu, notebook'taki tablo ile tutarli olur.
 """
 
+import os
+import json
 import time
 import numpy as np
-import cv2
-import torch
-import clip
-from PIL import Image
 from pathlib import Path
 
-# ── Config ──────────────────────────────────────────────
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+from src.inference import CLIPInference
 
-ANOMALY_CLASSES = [
-    "flames and smoke from a fire or arson",
-    "people punching and kicking each other in a violent fight",
-    "a person breaking into a building or stealing property",
-    "police handcuffing or forcibly restraining a person",
-    "a serious car crash or road accident",
-    "someone vandalizing or destroying property",
-    "a person being physically attacked or assaulted",
-    "armed robbery or shooting with a weapon",
-]
-
-NORMAL_CLASSES = [
-    "people walking normally in a public area",
-    "security camera footage of a calm street",
-    "ordinary daily activity with no danger",
-    "surveillance footage of a peaceful environment",
-    "normal crowd movement in a safe location",
-]
-
+# UCF-Crime anomali sinif etiketleri — src.config.ANOMALY_CLASSES SIRASIYLA AYNI olmali
 ANOMALY_TYPE_LABELS = [
     "Explosion",      # flames and smoke from a fire or arson
     "Fighting",       # people punching and kicking
-    "Burglary",       # breaking into a building
+    "Burglary",       # breaking into a building / stealing
     "Arrest",         # police handcuffing
     "RoadAccidents",  # car crash
     "Vandalism",      # vandalizing property
     "Assault",        # physically attacked
-    "Robbery",        # armed robbery
+    "Robbery",        # armed robbery / shooting
 ]
 
-SEGMENT_FRAMES = 16   # segment başına frame sayısı
-TOPK_RATIO     = 0.30
-DEFAULT_THRESHOLD = -0.000795
 
-# ── Model yükle ─────────────────────────────────────────
-print(f"[pipeline] Loading CLIP on {DEVICE}...")
-model, preprocess = clip.load("ViT-L/14", device=DEVICE)
-model.eval()
-
-anomaly_tokens = clip.tokenize(ANOMALY_CLASSES).to(DEVICE)
-normal_tokens  = clip.tokenize(NORMAL_CLASSES).to(DEVICE)
-
-with torch.no_grad():
-    anomaly_text_feats = model.encode_text(anomaly_tokens)
-    anomaly_text_feats = anomaly_text_feats / anomaly_text_feats.norm(dim=-1, keepdim=True)
-    normal_text_feats  = model.encode_text(normal_tokens)
-    normal_text_feats  = normal_text_feats / normal_text_feats.norm(dim=-1, keepdim=True)
-
-print("[pipeline] CLIP ready.")
-
-
-# ── Yardımcı ────────────────────────────────────────────
-def _topk_mean(arr: np.ndarray, ratio: float) -> float:
+def _topk_mean_over_segments(values, ratio):
+    """En yuksek %ratio segmentin ortalamasi (aggregation.py ile ayni mantik)."""
+    arr = np.sort(np.asarray(values, dtype=float))[::-1]
     k = max(1, int(len(arr) * ratio))
-    return float(np.sort(arr)[::-1][:k].mean())
+    return float(arr[:k].mean())
 
 
-def _score_segment(frames: list) -> dict:
-    """
-    Frame listesi → segment skoru ve anomaly type döndürür.
-    """
-    images = torch.stack([
-        preprocess(Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)))
-        for f in frames
-    ]).to(DEVICE)
+class AnomalyPipeline:
+    def __init__(self, artifacts_path):
+        # CLIP + promptlar: degerlendirmedeki ile AYNI kaynak (config.py)
+        self.clip = CLIPInference()
+        self.clip.set_text_prompts()
 
-    with torch.no_grad():
-        img_feats = model.encode_image(images)
-        img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+        # Kalibrasyon degerlerini artifact'tan oku (sabit yazma!)
+        with open(artifacts_path) as f:
+            cal = json.load(f)
+        self.threshold  = float(cal["threshold"])
+        self.topk_ratio = float(cal["topk_ratio"])
+        print(f"[pipeline] threshold={self.threshold:.6f}  topk_ratio={self.topk_ratio}")
 
-        anomaly_sims = (img_feats @ anomaly_text_feats.T)  # [N, 8]
-        normal_sims  = (img_feats @ normal_text_feats.T)   # [N, 5]
+    def _segment_dirs(self, video_dir):
+        """video_dir altinda segment alt-klasorleri; yoksa video_dir'in kendisi tek segment."""
+        p = Path(video_dir)
+        sub = sorted([d for d in p.iterdir() if d.is_dir()])
+        return sub if sub else [p]
 
-    anomaly_per_frame = anomaly_sims.mean(dim=1).cpu().numpy()
-    normal_per_frame  = normal_sims.mean(dim=1).cpu().numpy()
-    diff_per_frame    = anomaly_per_frame - normal_per_frame
+    def score_video(self, video_dir):
+        """Bir videoyu (segment kare-klasorleri) puanlar ve karar dondurur."""
+        seg_anomaly, seg_normal, segments = [], [], []
 
-    score = _topk_mean(diff_per_frame, TOPK_RATIO)
+        for sd in self._segment_dirs(video_dir):
+            try:
+                pred = self.clip.predict_segment(str(sd))   # inference.py — AYNI kod yolu
+            except Exception as e:
+                print(f"[pipeline] segment atlandi: {sd} | {e}")
+                continue
 
-    # En yüksek anomaly prompt
-    top_idx      = int(anomaly_sims.mean(dim=0).argmax().item())
-    anomaly_type = ANOMALY_TYPE_LABELS[top_idx]
-    top_prompt   = ANOMALY_CLASSES[top_idx]
+            a = float(np.max(pred["anomaly_sim"]))   # segment basina: en iyi anomali promptu
+            n = float(np.max(pred["normal_sim"]))    # en iyi normal promptu
+            seg_anomaly.append(a)
+            seg_normal.append(n)
 
-    return {
-        "score"       : round(score, 6),
-        "frame_scores": [round(s, 6) for s in diff_per_frame.tolist()],
-        "anomaly_type": anomaly_type,
-        "top_prompt"  : top_prompt,
-    }
+            top_idx = int(np.argmax(pred["anomaly_sim"]))
+            segments.append({
+                "segment"     : sd.name,
+                "seg_score"   : round(a - n, 6),
+                "anomaly_type": ANOMALY_TYPE_LABELS[top_idx],
+            })
 
+        if not seg_anomaly:
+            raise ValueError(f"Puanlanabilir segment yok: {video_dir}")
 
-def _extract_segments(segment_dir: str, segment_frames: int) -> tuple:
-    p = Path(segment_dir)
+        # Video skoru — notebook ile AYNI: segmentler uzerinde top-K mean farki
+        score_diff = (
+            _topk_mean_over_segments(seg_anomaly, self.topk_ratio)
+            - _topk_mean_over_segments(seg_normal, self.topk_ratio)
+        )
+        video_is_anomaly = bool(score_diff > self.threshold)
 
-    # Direkt frame klasörü mü (seg_0000 gibi)?
-    frames_direct = sorted(p.glob("*.jpg")) or sorted(p.glob("*.png"))
-    if frames_direct:
-        frames = []
-        for f in frames_direct:
-            img = cv2.imread(str(f))
-            if img is not None:
-                frames.append(img)
-        return [frames], 25.0
+        return {
+            "video_is_anomaly": video_is_anomaly,
+            "score_diff"      : round(score_diff, 6),
+            "threshold"       : self.threshold,
+            "topk_ratio"      : self.topk_ratio,
+            "n_segments"      : len(seg_anomaly),
+            "segments"        : segments,   # segment-bazli skor + olasi anomali turu (lokalizasyon/UI icin)
+        }
 
-    # Video klasörü — alt seg klasörlerini paralel oku
-    from concurrent.futures import ThreadPoolExecutor
+    def measure_fps(self, video_dir, n_segments=10):
+        """Ilk n_segments segmenti puanlayip saniyede kac segment islendigini olcer."""
+        seg_dirs = self._segment_dirs(video_dir)[:n_segments]
+        if not seg_dirs:
+            return {"n_segments": 0, "elapsed_sec": 0.0, "fps": 0.0, "target_met": False}
 
-    seg_dirs = sorted([d for d in p.iterdir() if d.is_dir()])
+        start = time.time()
+        ok = 0
+        for sd in seg_dirs:
+            try:
+                self.clip.predict_segment(str(sd))
+                ok += 1
+            except Exception:
+                pass
+        elapsed = time.time() - start
+        fps = ok / elapsed if elapsed > 0 else 0.0
 
-    def load_seg(seg_dir):
-        files = sorted(seg_dir.glob("*.jpg")) or sorted(seg_dir.glob("*.png"))
-        frames = []
-        for f in files:
-            img = cv2.imread(str(f))
-            if img is not None:
-                frames.append(img)
-        return frames
+        print(f"Islenen segment : {ok}")
+        print(f"Sure            : {elapsed:.2f}s")
+        print(f"FPS             : {fps:.2f}")
+        print(f"Hedef (>=15)    : {'OK' if fps >= 15 else 'NO'}")
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        segments = list(ex.map(load_seg, seg_dirs))
-
-    segments = [s for s in segments if s]
-    return segments, 25.0
-
-
-def measure_fps(segment_dir: str, n_segments: int = 10) -> dict:
-    """
-    İlk n_segments segmenti işleyip FPS ölçer.
-    """
-    segments_raw, _ = _extract_segments(segment_dir, SEGMENT_FRAMES)
-    test_segments   = segments_raw[:n_segments]
-
-    if not test_segments:
-        print("Segment bulunamadı.")
-        return {"n_segments": 0, "elapsed_sec": 0, "fps": 0, "target_met": False}
-
-    start = time.time()
-    for frames in test_segments:
-        _score_segment(frames)
-    elapsed = time.time() - start
-
-    fps = len(test_segments) / elapsed
-
-    print(f"İşlenen segment : {len(test_segments)}")
-    print(f"Süre            : {elapsed:.2f}s")
-    print(f"FPS             : {fps:.2f}")
-    print(f"Hedef (>=15)    : {'✅' if fps >= 15 else '❌'}")
-
-    return {
-        "n_segments" : len(test_segments),
-        "elapsed_sec": round(elapsed, 3),
-        "fps"        : round(fps, 2),
-        "target_met" : fps >= 15,
-    }
+        return {
+            "n_segments" : ok,
+            "elapsed_sec": round(elapsed, 3),
+            "fps"        : round(fps, 2),
+            "target_met" : fps >= 15,
+        }
 
 
-def run_realtime_pipeline(
-    segment_dir: str,
-    anomaly_score_fn=None,
-    threshold: float = DEFAULT_THRESHOLD,
-) -> dict:
-    segments_raw, fps_vid = _extract_segments(segment_dir, SEGMENT_FRAMES)
+if __name__ == "__main__":
+    PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "/home/yasemin/video-anomaly-clip")
+    ARTIFACTS    = f"{PROJECT_ROOT}/artifacts/threshold.json"
 
-    results = []
-    for idx, frames in enumerate(segments_raw):
-        if not frames:
-            continue
-        if anomaly_score_fn is not None:
-            score = anomaly_score_fn(frames)
-            seg_result = {
-                "segment_idx" : idx,
-                "score"       : round(float(score), 6),
-                "is_anomaly"  : score > threshold,
-                "anomaly_type": None,
-                "top_prompt"  : None,
-                "frame_scores": [],
-            }
-        else:
-            seg = _score_segment(frames)
-            seg_result = {
-                "segment_idx" : idx,
-                "score"       : seg["score"],
-                "is_anomaly"  : seg["score"] > threshold,
-                "anomaly_type": seg["anomaly_type"] if seg["score"] > threshold else None,
-                "top_prompt"  : seg["top_prompt"],
-                "frame_scores": seg["frame_scores"],
-            }
-        results.append(seg_result)
-
-    anomaly_count    = sum(1 for r in results if r["is_anomaly"])
-    video_is_anomaly = anomaly_count > 0
-
-    return {
-        "segments"        : results,
-        "video_is_anomaly": video_is_anomaly,
-        "anomaly_ratio"   : round(anomaly_count / max(len(results), 1), 3),
-        "threshold"       : threshold,
-        "fps_video"       : fps_vid,
-        "n_segments"      : len(results),
-    }
+    pipe = AnomalyPipeline(ARTIFACTS)
+    # ornek: bir video klasoru ver (icinde segment alt-klasorleri)
+    # result = pipe.score_video(f"{PROJECT_ROOT}/data/segments_new/<video_id>")
+    # print(json.dumps(result, indent=2, ensure_ascii=False))

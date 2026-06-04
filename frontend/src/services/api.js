@@ -44,3 +44,16 @@ export async function predictPipeline(file) {
 
   return response.json();
 }
+
+export async function predictPipelineFromFrames(segmentPath) {
+  const response = await fetch(
+    `${API_URL}/predict/pipeline/frames?segment_path=${encodeURIComponent(segmentPath)}`,
+    { method: "POST" }
+  );
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  return response.json();
+}

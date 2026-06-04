@@ -1,7 +1,7 @@
 import { useState } from "react";
 import FrameChart from "./FrameChart";
 
-export default function ResultPanel({ result, pipelineResult, loading }) {
+export default function ResultPanel({ result, pipelineResult, loading, mode }) {
   const [selectedSeg, setSelectedSeg] = useState(0);
 
   if (loading) {
@@ -15,11 +15,29 @@ export default function ResultPanel({ result, pipelineResult, loading }) {
 
   // Pipeline modu
   if (pipelineResult) {
-    const { segments, video_is_anomaly, anomaly_ratio, threshold } = pipelineResult;
+    const { segments, video_is_anomaly, threshold, score_diff } = pipelineResult;
     const seg = segments[selectedSeg];
 
     return (
       <div className="result-panel">
+        <div style={{
+          borderLeft: "3px solid #f59e0b",
+          background: "#161616",
+          borderRadius: "4px",
+          padding: "6px 10px",
+          marginBottom: "10px",
+          display: "flex",
+          flexDirection: "column",
+          gap: "2px",
+        }}>
+          <span style={{ color: "#f59e0b", fontSize: "11px", fontWeight: 700, letterSpacing: "0.5px" }}>
+            PIPELINE — Lokalizasyon
+          </span>
+          <span style={{ color: "#888", fontSize: "11px" }}>
+            Segment-segment zaman çizelgesi; karar video-seviyesi top-K ile verilir.
+          </span>
+        </div>
+
         <div className={`decision-badge ${video_is_anomaly ? "anomaly" : "normal"}`}>
           {video_is_anomaly ? "⚠ ANOMALY DETECTED" : "✓ NORMAL VIDEO"}
         </div>
@@ -30,8 +48,10 @@ export default function ResultPanel({ result, pipelineResult, loading }) {
             <span className="metric-value">{segments.length}</span>
           </div>
           <div className="metric">
-            <span className="metric-label">Anomaly ratio</span>
-            <span className="metric-value">{(anomaly_ratio * 100).toFixed(0)}%</span>
+            <span className="metric-label">Score diff</span>
+            <span className={`metric-value ${video_is_anomaly ? "danger" : "ok"}`}>
+              {(score_diff ?? 0).toFixed(3)}
+            </span>
           </div>
           <div className="metric">
             <span className="metric-label">Threshold</span>
@@ -75,24 +95,22 @@ export default function ResultPanel({ result, pipelineResult, loading }) {
             </p>
             <div className={`decision-badge ${seg.is_anomaly ? "anomaly" : "normal"}`}
               style={{ fontSize: "12px", padding: "4px 10px", marginBottom: "8px" }}>
-              {seg.is_anomaly ? `⚠ ${seg.anomaly_type}` : "✓ Normal"}
+              {seg.is_anomaly ? "⚠ Anomali" : "✓ Normal"}
             </div>
             <p style={{ color: "#666", fontSize: "12px" }}>Score: {seg.score.toFixed(4)}</p>
 
-            <FrameChart scores={seg.frame_scores} threshold={threshold} />
-
             {seg.all_frames && seg.all_frames.length > 0 && (
               <div className="anomaly-frames">
-                <p className="prompt-label">ANALYZED FRAMES</p>
+                <p className="prompt-label">SEGMENT FRAME</p>
                 <div className="frames-grid">
                   {seg.all_frames.map((b64, i) => (
                     <div key={i} className="frame-wrapper">
                       <img
                         src={`data:image/jpeg;base64,${b64}`}
-                        alt={`frame ${i}`}
-                        className={`anomaly-frame-img ${seg.frame_scores[i] > threshold ? "anom" : "norm"}`}
+                        alt={`segment ${seg.segment_idx} frame`}
+                        className={`anomaly-frame-img ${seg.is_anomaly ? "anom" : "norm"}`}
                       />
-                      <span className="frame-score">{seg.frame_scores[i].toFixed(3)}</span>
+                      <span className="frame-score">{seg.score.toFixed(3)}</span>
                     </div>
                   ))}
                 </div>
@@ -104,24 +122,82 @@ export default function ResultPanel({ result, pipelineResult, loading }) {
     );
   }
 
-  // Single modu
+  // Henüz sonuç yok
   if (!result) {
+    const EMPTY_INFO = {
+      single: {
+        tag: "SINGLE — Hızlı triyaj",
+        desc: "Ham video yükle → tek bir video-seviyesi evet/hayır kararı.",
+        color: "#0ea5e9",
+      },
+      pipeline: {
+        tag: "PIPELINE — Lokalizasyon",
+        desc: "Ham video yükle → segment-segment zaman çizelgesi (anomali nerede?).",
+        color: "#f59e0b",
+      },
+      test: {
+        tag: "TEST — Doğruluk kanıtı",
+        desc: "Datasetteki segment klasörü → score_diff notebook tablosuyla eşleşir.",
+        color: "#a855f7",
+      },
+    };
+    const info = EMPTY_INFO[mode] || EMPTY_INFO.single;
     return (
       <div className="result-panel empty">
-        <p>Results will appear here</p>
+        <div style={{
+          borderLeft: `3px solid ${info.color}`,
+          background: "#161616",
+          borderRadius: "4px",
+          padding: "10px 12px",
+          maxWidth: "320px",
+          textAlign: "left",
+        }}>
+          <p style={{ color: info.color, fontSize: "12px", fontWeight: 700, margin: "0 0 4px", letterSpacing: "0.5px" }}>
+            {info.tag}
+          </p>
+          <p style={{ color: "#888", fontSize: "12px", margin: 0 }}>{info.desc}</p>
+        </div>
       </div>
     );
   }
 
-  const { is_anomaly, anomaly_type, score_diff, threshold, top_prompt, frame_scores, all_frames } = result;
+  const { is_anomaly, score_diff, threshold, frame_scores, all_frames } = result;
+
+  const MODE_BANNER = {
+    single: {
+      tag: "SINGLE — Hızlı triyaj",
+      desc: "Ham video → tek bir video-seviyesi evet/hayır kararı.",
+      color: "#0ea5e9",
+    },
+    test: {
+      tag: "TEST — Doğruluk kanıtı",
+      desc: "Datasetteki hazır segmentler → score_diff notebook tablosuyla birebir eşleşir.",
+      color: "#a855f7",
+    },
+  };
+  const banner = MODE_BANNER[mode] || MODE_BANNER.single;
 
   return (
     <div className="result-panel">
+      <div style={{
+        borderLeft: `3px solid ${banner.color}`,
+        background: "#161616",
+        borderRadius: "4px",
+        padding: "6px 10px",
+        marginBottom: "10px",
+        display: "flex",
+        flexDirection: "column",
+        gap: "2px",
+      }}>
+        <span style={{ color: banner.color, fontSize: "11px", fontWeight: 700, letterSpacing: "0.5px" }}>
+          {banner.tag}
+        </span>
+        <span style={{ color: "#888", fontSize: "11px" }}>{banner.desc}</span>
+      </div>
+
       <div className={`decision-badge ${is_anomaly ? "anomaly" : "normal"}`}>
         {is_anomaly ? "⚠ ANOMALY DETECTED" : "✓ NORMAL VIDEO"}
       </div>
-
-      {is_anomaly && <p className="anomaly-type">{anomaly_type}</p>}
 
       <div className="metrics-row">
         <div className="metric">
@@ -135,7 +211,7 @@ export default function ResultPanel({ result, pipelineResult, loading }) {
           <span className="metric-value">{threshold.toFixed(3)}</span>
         </div>
         <div className="metric">
-          <span className="metric-label">Frames</span>
+          <span className="metric-label">Segments</span>
           <span className="metric-value">{frame_scores.length}</span>
         </div>
       </div>
@@ -144,13 +220,13 @@ export default function ResultPanel({ result, pipelineResult, loading }) {
 
       {all_frames && all_frames.length > 0 && (
         <div className="anomaly-frames">
-          <p className="prompt-label">ANALYZED FRAMES</p>
+          <p className="prompt-label">ANALYZED SEGMENTS</p>
           <div className="frames-grid">
             {all_frames.map((b64, i) => (
               <div key={i} className="frame-wrapper">
                 <img
                   src={`data:image/jpeg;base64,${b64}`}
-                  alt={`frame ${i}`}
+                  alt={`segment ${i}`}
                   className={`anomaly-frame-img ${frame_scores[i] > threshold ? "anom" : "norm"}`}
                 />
                 <span className="frame-score">{frame_scores[i].toFixed(3)}</span>

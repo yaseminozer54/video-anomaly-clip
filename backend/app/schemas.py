@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List, Any
+from typing import Optional, List
 
 class PredictionResponse(BaseModel):
     is_anomaly: bool
@@ -7,7 +7,8 @@ class PredictionResponse(BaseModel):
     score_diff: float
     threshold: float
     top_prompt: str
-    frame_scores: List[float]
+    frame_scores: List[float]      # segment-seviyesi skorlar
+    segment_flags: List[bool] = [] # segment kirmizi mi (top-K karar segmenti)
     all_frames: List[str]
 
 class SegmentResult(BaseModel):
@@ -27,3 +28,4 @@ class PipelineResponse(BaseModel):
     anomaly_ratio: float
     n_segments: int
     threshold: float
+    score_diff: float = 0.0

@@ -1,204 +1,101 @@
 """
-inference_service.py — Gerçek CLIP inference
+inference_service.py — B sistemi backend.
+Kirmizi (anomali) segment isareti TUM modlarda TEK anlama gelir:
+'karari suren top-K segment'. Tek segment esige gore degil; video anomali ise
+ve segment top-K icindeyse kirmizi. Normal videoda hic kirmizi olmaz.
 """
 
 import sys
+import json
 import base64
 import numpy as np
 from pathlib import Path
+
 import cv2
 import torch
-import clip
+import torch.nn.functional as F
 from PIL import Image
 
 PROJECT_ROOT = "/home/yasemin/video-anomaly-clip"
 sys.path.append(PROJECT_ROOT)
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+from src.inference import CLIPInference
 
-ANOMALY_CLASSES = [
-    "flames and smoke from a fire or arson",
-    "people punching and kicking each other in a violent fight",
-    "a person breaking into a building or stealing property",
-    "police handcuffing or forcibly restraining a person",
-    "a serious car crash or road accident",
-    "someone vandalizing or destroying property",
-    "a person being physically attacked or assaulted",
-    "armed robbery or shooting with a weapon",
-]
-
-NORMAL_CLASSES = [
-    "people walking normally in a public area",
-    "security camera footage of a calm street",
-    "ordinary daily activity with no danger",
-    "surveillance footage of a peaceful environment",
-    "normal crowd movement in a safe location",
-]
+DEVICE         = "cuda" if torch.cuda.is_available() else "cpu"
+SEGMENT_FRAMES = 16
+ARTIFACTS      = f"{PROJECT_ROOT}/artifacts/threshold.json"
 
 ANOMALY_TYPE_LABELS = [
     "Explosion", "Fighting", "Burglary", "Arrest",
     "RoadAccidents", "Vandalism", "Assault", "Robbery",
 ]
 
-THRESHOLD      = -0.000795
-TOPK_RATIO     = 0.30
-SEGMENT_FRAMES = 16
+print(f"[inference_service] CLIP yukleniyor ({DEVICE})...")
+_clip = CLIPInference()
+_clip.set_text_prompts()
 
-print(f"[inference_service] Loading CLIP on {DEVICE}...")
-model, preprocess = clip.load("ViT-L/14", device=DEVICE)
-model.eval()
-
-anomaly_tokens = clip.tokenize(ANOMALY_CLASSES).to(DEVICE)
-normal_tokens  = clip.tokenize(NORMAL_CLASSES).to(DEVICE)
-
-with torch.no_grad():
-    anomaly_text_feats = model.encode_text(anomaly_tokens)
-    anomaly_text_feats = anomaly_text_feats / anomaly_text_feats.norm(dim=-1, keepdim=True)
-    normal_text_feats  = model.encode_text(normal_tokens)
-    normal_text_feats  = normal_text_feats / normal_text_feats.norm(dim=-1, keepdim=True)
-
-print("[inference_service] CLIP ready.")
+with open(ARTIFACTS) as _f:
+    _cal = json.load(_f)
+THRESHOLD  = float(_cal["threshold"])
+TOPK_RATIO = float(_cal["topk_ratio"])
+print(f"[inference_service] threshold={THRESHOLD:.6f}  topk_ratio={TOPK_RATIO}  (threshold.json'dan)")
 
 
-def _topk_mean(arr: np.ndarray, ratio: float) -> float:
-    k = max(1, int(len(arr) * ratio))
-    return float(np.sort(arr)[::-1][:k].mean())
-
-
-def _encode_frames(frames_bgr: list) -> tuple:
-    images = torch.stack([
-        preprocess(Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)))
-        for f in frames_bgr
-    ]).to(DEVICE)
-
+# ---------------------------------------------------------------------
+# Cekirdek
+# ---------------------------------------------------------------------
+def _segment_sims(frames_bgr):
+    embs = []
     with torch.no_grad():
-        img_feats = model.encode_image(images)
-        img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
-        anomaly_sims = (img_feats @ anomaly_text_feats.T)
-        normal_sims  = (img_feats @ normal_text_feats.T)
-
-    anomaly_per_frame = anomaly_sims.mean(dim=1).cpu().numpy()
-    normal_per_frame  = normal_sims.mean(dim=1).cpu().numpy()
-    diff_per_frame    = anomaly_per_frame - normal_per_frame
-    anomaly_sims_mean = anomaly_sims.mean(dim=0).cpu().numpy()
-
-    base64_frames = []
-    for f in frames_bgr:
-        _, buf = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, 70])
-        b64 = base64.b64encode(buf).decode("utf-8")
-        base64_frames.append(b64)
-
-    return anomaly_sims_mean, diff_per_frame, base64_frames
+        for f in frames_bgr:
+            img = Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB))
+            inp = _clip.preprocess(img).unsqueeze(0).to(DEVICE)
+            embs.append(_clip.model.encode_image(inp))
+    seg = torch.cat(embs, dim=0).mean(dim=0, keepdim=True)
+    seg = F.normalize(seg, dim=-1)
+    a = (seg @ _clip.anomaly_embeddings.T).squeeze(0).cpu().numpy()
+    n = (seg @ _clip.normal_embeddings.T).squeeze(0).cpu().numpy()
+    return a, n
 
 
-def preprocess_video(video_path: str) -> list:
-    cap   = cv2.VideoCapture(video_path)
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total <= 0:
-        cap.release()
-        return []
-
-    indices = np.linspace(0, total - 1, SEGMENT_FRAMES, dtype=int)
-    frames  = []
-    for idx in indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
-        ret, frame = cap.read()
-        if ret:
-            frames.append(frame)
-    cap.release()
-    return frames
+def _topk_mean_over_segments(values, ratio):
+    arr = np.sort(np.asarray(values, dtype=float))[::-1]
+    k = max(1, int(len(arr) * ratio))
+    return float(arr[:k].mean())
 
 
-def run_clip_inference(frames: list) -> list:
-    if not frames:
-        return []
-    _, diff_per_frame, _ = _encode_frames(frames)
-    return diff_per_frame.tolist()
+def _topk_anomaly_indices(seg_scores, ratio):
+    n = len(seg_scores)
+    k = max(1, int(n * ratio))
+    order = sorted(range(n), key=lambda i: seg_scores[i], reverse=True)
+    return set(order[:k])
 
 
-def predict_video(video_path: str) -> dict:
-    frames = preprocess_video(video_path)
-    if not frames:
-        return {
-            "is_anomaly"  : False,
-            "anomaly_type": None,
-            "score_diff"  : 0.0,
-            "threshold"   : THRESHOLD,
-            "top_prompt"  : NORMAL_CLASSES[0],
-            "frame_scores": [],
-            "all_frames"  : [],
-        }
-
-    anomaly_sims_mean, diff_per_frame, base64_frames = _encode_frames(frames)
-    score_diff = _topk_mean(diff_per_frame, TOPK_RATIO)
-    is_anomaly = score_diff > THRESHOLD
-
-    top_idx      = int(np.argmax(anomaly_sims_mean))
-    top_prompt   = ANOMALY_CLASSES[top_idx]
-    anomaly_type = ANOMALY_TYPE_LABELS[top_idx] if is_anomaly else None
-
-    return {
-        "is_anomaly"  : bool(is_anomaly),
-        "anomaly_type": anomaly_type,
-        "score_diff"  : round(float(score_diff), 6),
-        "threshold"   : THRESHOLD,
-        "top_prompt"  : top_prompt,
-        "frame_scores": [round(s, 6) for s in diff_per_frame.tolist()],
-        "all_frames"  : base64_frames,
-    }
+def _video_decision(seg_anomaly, seg_normal):
+    score_diff = (
+        _topk_mean_over_segments(seg_anomaly, TOPK_RATIO)
+        - _topk_mean_over_segments(seg_normal, TOPK_RATIO)
+    )
+    return score_diff, bool(score_diff > THRESHOLD)
 
 
-def predict_from_frames(segment_path: str) -> dict:
-    p = Path(segment_path)
-    frame_paths = sorted(p.glob("*.jpg"))
-    if not frame_paths:
-        frame_paths = sorted(p.glob("*.png"))
-    if not frame_paths:
-        return {
-            "is_anomaly"  : False,
-            "anomaly_type": None,
-            "score_diff"  : 0.0,
-            "threshold"   : THRESHOLD,
-            "top_prompt"  : NORMAL_CLASSES[0],
-            "frame_scores": [],
-            "all_frames"  : [],
-        }
-
-    frames = [cv2.imread(str(f)) for f in frame_paths]
-    frames = [f for f in frames if f is not None]
-
-    anomaly_sims_mean, diff_per_frame, base64_frames = _encode_frames(frames)
-    score_diff = _topk_mean(diff_per_frame, TOPK_RATIO)
-    is_anomaly = score_diff > THRESHOLD
-
-    top_idx      = int(np.argmax(anomaly_sims_mean))
-    top_prompt   = ANOMALY_CLASSES[top_idx]
-    anomaly_type = ANOMALY_TYPE_LABELS[top_idx] if is_anomaly else None
-
-    return {
-        "is_anomaly"  : bool(is_anomaly),
-        "anomaly_type": anomaly_type,
-        "score_diff"  : round(float(score_diff), 6),
-        "threshold"   : THRESHOLD,
-        "top_prompt"  : top_prompt,
-        "frame_scores": [round(s, 6) for s in diff_per_frame.tolist()],
-        "all_frames"  : base64_frames,
-    }
+def _segment_flags(seg_scores, video_is_anomaly):
+    """Segment kirmizi mi? video anomali ise top-K segmentler True, digerleri False.
+    Video normalse hicbiri True degil. Tum modlarda AYNI kural."""
+    hot = _topk_anomaly_indices(seg_scores, TOPK_RATIO) if video_is_anomaly else set()
+    return [i in hot for i in range(len(seg_scores))]
 
 
-def predict_pipeline(video_path: str) -> dict:
-    cap   = cv2.VideoCapture(video_path)
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps   = cap.get(cv2.CAP_PROP_FPS) or 25.0
+def _b64(frame_bgr):
+    _, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    return base64.b64encode(buf).decode("utf-8")
 
-    if total <= 0:
-        cap.release()
-        return {"segments": [], "video_is_anomaly": False, "anomaly_ratio": 0.0, "n_segments": 0, "threshold": THRESHOLD}
 
-    segments = []
-    current  = []
-
-    for i in range(total):
+def _split_into_segments(video_path):
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    segments, current = [], []
+    while True:
         ret, frame = cap.read()
         if not ret:
             break
@@ -206,44 +103,190 @@ def predict_pipeline(video_path: str) -> dict:
         if len(current) == SEGMENT_FRAMES:
             segments.append(current)
             current = []
-
     if current:
         segments.append(current)
-
     cap.release()
+    return segments, fps
+
+
+def _read_segment_frames(seg_dir):
+    fp = sorted(seg_dir.glob("*.jpg")) or sorted(seg_dir.glob("*.png"))
+    frames = [cv2.imread(str(f)) for f in fp]
+    return [f for f in frames if f is not None]
+
+
+def _build_timeline(seg_anomaly, seg_normal, seg_scores, seg_a_idx, seg_n_idx, seg_b64, fps=None):
+    score_diff, video_is_anomaly = _video_decision(seg_anomaly, seg_normal)
+    flags = _segment_flags(seg_scores, video_is_anomaly)
 
     results = []
-    for idx, frames in enumerate(segments):
-        anomaly_sims_mean, diff_per_frame, base64_frames = _encode_frames(frames)
-        score_diff = _topk_mean(diff_per_frame, TOPK_RATIO)
-        is_anomaly = score_diff > THRESHOLD
+    for idx in range(len(seg_scores)):
+        seg_is_anom = flags[idx]
+        if fps is not None:
+            start = round(idx * SEGMENT_FRAMES / fps, 2)
+            end   = round((idx + 1) * SEGMENT_FRAMES / fps, 2)
+        else:
+            start, end = float(idx), float(idx + 1)
 
-        top_idx      = int(np.argmax(anomaly_sims_mean))
-        top_prompt   = ANOMALY_CLASSES[top_idx]
-        anomaly_type = ANOMALY_TYPE_LABELS[top_idx] if is_anomaly else None
-
-        start_sec = (idx * SEGMENT_FRAMES) / fps
-        end_sec   = ((idx + 1) * SEGMENT_FRAMES) / fps
+        if seg_is_anom:
+            anomaly_type = ANOMALY_TYPE_LABELS[seg_a_idx[idx]]
+            top_prompt   = _clip.anomaly_texts[seg_a_idx[idx]]
+        else:
+            anomaly_type = None
+            top_prompt   = _clip.normal_texts[seg_n_idx[idx]]
 
         results.append({
-            "segment_idx" : idx,
-            "start_sec"   : round(start_sec, 2),
-            "end_sec"     : round(end_sec, 2),
-            "score"       : round(float(score_diff), 6),
-            "is_anomaly"  : bool(is_anomaly),
+            "segment_idx": idx,
+            "start_sec": start,
+            "end_sec": end,
+            "score": round(seg_scores[idx], 6),
+            "is_anomaly": seg_is_anom,
             "anomaly_type": anomaly_type,
-            "top_prompt"  : top_prompt,
-            "frame_scores": [round(s, 6) for s in diff_per_frame.tolist()],
-            "all_frames"  : base64_frames,
+            "top_prompt": top_prompt,
+            "frame_scores": [round(seg_scores[idx], 6)],
+            "all_frames": [seg_b64[idx]],
         })
 
-    anomaly_count    = sum(1 for r in results if r["is_anomaly"])
-    video_is_anomaly = anomaly_count > 0
+    return {
+        "segments": results,
+        "video_is_anomaly": video_is_anomaly,
+        "anomaly_ratio": round(sum(flags) / max(len(results), 1), 3),
+        "n_segments": len(results),
+        "threshold": THRESHOLD,
+        "score_diff": round(score_diff, 6),
+    }
+
+
+# ---------------------------------------------------------------------
+# Endpoint mantiklari
+# ---------------------------------------------------------------------
+def predict_from_frames(segment_path: str) -> dict:
+    """Test Mode — hazir kare klasoru."""
+    p = Path(segment_path)
+    sub = sorted([d for d in p.iterdir() if d.is_dir()]) if p.is_dir() else []
+    seg_anomaly, seg_normal, frame_diffs, all_frames = [], [], [], []
+    anomaly_vecs, normal_vecs = [], []
+    for sd in (sub if sub else [p]):
+        frames = _read_segment_frames(sd)
+        if not frames:
+            continue
+        a, n = _segment_sims(frames)
+        seg_anomaly.append(float(a.max()))
+        seg_normal.append(float(n.max()))
+        anomaly_vecs.append(a)
+        normal_vecs.append(n)
+        frame_diffs.append(round(float(a.max() - n.max()), 6))
+        all_frames.append(_b64(frames[len(frames) // 2]))
+
+    if not seg_anomaly:
+        return _empty_prediction()
+
+    score_diff, is_anomaly = _video_decision(seg_anomaly, seg_normal)
+    flags = _segment_flags(frame_diffs, is_anomaly)
+    if is_anomaly:
+        ti = int(np.argmax(np.mean(anomaly_vecs, axis=0)))
+        anomaly_type, top_prompt = ANOMALY_TYPE_LABELS[ti], _clip.anomaly_texts[ti]
+    else:
+        ni = int(np.argmax(np.mean(normal_vecs, axis=0)))
+        anomaly_type, top_prompt = None, _clip.normal_texts[ni]
 
     return {
-        "segments"        : results,
-        "video_is_anomaly": video_is_anomaly,
-        "anomaly_ratio"   : round(anomaly_count / max(len(results), 1), 3),
-        "n_segments"      : len(results),
-        "threshold"       : THRESHOLD,
+        "is_anomaly": is_anomaly,
+        "anomaly_type": anomaly_type,
+        "score_diff": round(score_diff, 6),
+        "threshold": THRESHOLD,
+        "top_prompt": top_prompt,
+        "frame_scores": frame_diffs,
+        "segment_flags": flags,
+        "all_frames": all_frames,
+    }
+
+
+def predict_video(video_path: str) -> dict:
+    """Single Mode — ham video."""
+    segments, _ = _split_into_segments(video_path)
+    if not segments:
+        return _empty_prediction()
+    seg_anomaly, seg_normal, seg_scores, all_frames = [], [], [], []
+    anomaly_vecs, normal_vecs = [], []
+    for frames in segments:
+        a, n = _segment_sims(frames)
+        seg_anomaly.append(float(a.max()))
+        seg_normal.append(float(n.max()))
+        anomaly_vecs.append(a)
+        normal_vecs.append(n)
+        seg_scores.append(round(float(a.max() - n.max()), 6))
+        all_frames.append(_b64(frames[len(frames) // 2]))
+
+    score_diff, is_anomaly = _video_decision(seg_anomaly, seg_normal)
+    flags = _segment_flags(seg_scores, is_anomaly)
+    if is_anomaly:
+        ti = int(np.argmax(np.mean(anomaly_vecs, axis=0)))
+        anomaly_type, top_prompt = ANOMALY_TYPE_LABELS[ti], _clip.anomaly_texts[ti]
+    else:
+        ni = int(np.argmax(np.mean(normal_vecs, axis=0)))
+        anomaly_type, top_prompt = None, _clip.normal_texts[ni]
+
+    return {
+        "is_anomaly": is_anomaly,
+        "anomaly_type": anomaly_type,
+        "score_diff": round(score_diff, 6),
+        "threshold": THRESHOLD,
+        "top_prompt": top_prompt,
+        "frame_scores": seg_scores,
+        "segment_flags": flags,
+        "all_frames": all_frames,
+    }
+
+
+def predict_pipeline(video_path: str) -> dict:
+    """Pipeline Mode (ham video)."""
+    segments, fps = _split_into_segments(video_path)
+    if not segments:
+        return {"segments": [], "video_is_anomaly": False,
+                "anomaly_ratio": 0.0, "n_segments": 0, "threshold": THRESHOLD, "score_diff": 0.0}
+    seg_anomaly, seg_normal, seg_scores, seg_a_idx, seg_n_idx, seg_b64 = [], [], [], [], [], []
+    for frames in segments:
+        a, n = _segment_sims(frames)
+        seg_anomaly.append(float(a.max()))
+        seg_normal.append(float(n.max()))
+        seg_scores.append(float(a.max()) - float(n.max()))
+        seg_a_idx.append(int(np.argmax(a)))
+        seg_n_idx.append(int(np.argmax(n)))
+        seg_b64.append(_b64(frames[len(frames) // 2]))
+    return _build_timeline(seg_anomaly, seg_normal, seg_scores, seg_a_idx, seg_n_idx, seg_b64, fps=fps)
+
+
+def predict_pipeline_from_frames(segment_path: str) -> dict:
+    """Pipeline Mode (kayipsiz segment klasoru)."""
+    p = Path(segment_path)
+    sub = sorted([d for d in p.iterdir() if d.is_dir()]) if p.is_dir() else []
+    seg_anomaly, seg_normal, seg_scores, seg_a_idx, seg_n_idx, seg_b64 = [], [], [], [], [], []
+    for sd in (sub if sub else [p]):
+        frames = _read_segment_frames(sd)
+        if not frames:
+            continue
+        a, n = _segment_sims(frames)
+        seg_anomaly.append(float(a.max()))
+        seg_normal.append(float(n.max()))
+        seg_scores.append(float(a.max()) - float(n.max()))
+        seg_a_idx.append(int(np.argmax(a)))
+        seg_n_idx.append(int(np.argmax(n)))
+        seg_b64.append(_b64(frames[len(frames) // 2]))
+    if not seg_scores:
+        return {"segments": [], "video_is_anomaly": False,
+                "anomaly_ratio": 0.0, "n_segments": 0, "threshold": THRESHOLD, "score_diff": 0.0}
+    return _build_timeline(seg_anomaly, seg_normal, seg_scores, seg_a_idx, seg_n_idx, seg_b64, fps=None)
+
+
+def _empty_prediction():
+    return {
+        "is_anomaly": False,
+        "anomaly_type": None,
+        "score_diff": 0.0,
+        "threshold": THRESHOLD,
+        "top_prompt": _clip.normal_texts[0],
+        "frame_scores": [],
+        "segment_flags": [],
+        "all_frames": [],
     }
